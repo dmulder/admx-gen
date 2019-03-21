@@ -1,7 +1,11 @@
 import xml.etree.ElementTree as etree
-import os.path
+from lxml.etree import QName
+import os.path, re
+from itertools import chain
+from yast import *
 
 def fetch_admin_templates(fname):
+    Policies = {}
     templates = []
     items = {}
     def itemizer(ref, items):
@@ -16,18 +20,23 @@ def fetch_admin_templates(fname):
         if 'displayName' in items[ref].keys():
             items[ref]['item'] = Item(Id(ref), items[ref]['displayName'], False, children)
 
-    def fetch_attr(obj, attr, strings, presentations):
+    # Set a namespace for the tag, if present
+    def set_ns(tag, namespace):
+        return '{%s}%s' % (namespace, tag) if namespace else tag
+
+    def fetch_attr(obj, attr, strings, namespace, presentations):
         val = obj.attrib[attr]
         m = re.match('\$\((\w*).(\w*)\)', val)
         if m and m.group(1) == 'string':
-            val = strings.find('string[@id="%s"]' % m.group(2)).text
+            val = strings.find(set_ns('string[@id="%s"]' % m.group(2), namespace)).text
         elif m and m.group(1) == 'presentation':
-            val = presentations.find('presentation[@id="%s"]' % m.group(2)).text
+            val = presentations.find(set_ns('presentation[@id="%s"]' % m.group(2), namespace)).text
         return val
 
     fparts = os.path.splitext(fname)
     if fparts[-1].lower() == '.admx':
         admx = etree.fromstring(open(fname, 'r').read())
+        admx_ns = QName(admx.tag).namespace
         dirname = os.path.dirname(fparts[0])
         basename = os.path.basename(fparts[0])
         adml_file = os.path.join(dirname, 'en-US', '%s.adml' % basename)
@@ -36,24 +45,26 @@ def fetch_admin_templates(fname):
             if not os.path.exists(adml_file):
                 raise ValueError('adml file not found for %s' % fname)
         adml = etree.fromstring(open(adml_file, 'r').read())
-
-        strings = adml.find('resources').find('stringTable')
-        presentations = adml.find('resources').find('presentationTable')
-        policies = admx.find('policies').findall('policy')
-        parents = set([p.find('parentCategory').attrib['ref'] for p in policies])
-        categories = admx.find('categories').findall('category')
+        adml_ns = QName(adml.tag).namespace
+        resources = adml.find(set_ns('resources', adml_ns))
+        strings = resources.find(set_ns('stringTable', adml_ns))
+        presentations = resources.find(set_ns('presentationTable', adml_ns))
+        policies = admx.find(set_ns('policies', admx_ns)).findall(set_ns('policy', admx_ns))
+        parents = set([p.find(set_ns('parentCategory', admx_ns)).attrib['ref'] for p in policies])
+        categories = admx.find(set_ns('categories', admx_ns)).findall(set_ns('category', admx_ns))
         for category in categories:
-            disp = fetch_attr(category, 'displayName', strings, presentations)
+            disp = fetch_attr(category, 'displayName', strings, adml_ns, presentations)
             my_ref = category.attrib['name']
-            par_ref = category.find('parentCategory').attrib['ref']
+            parentCategory = category.find(set_ns('parentCategory', admx_ns))
+            par_ref = parentCategory.attrib['ref'] if parentCategory else None
 
             if my_ref not in items.keys():
                 items[my_ref] = {}
                 items[my_ref]['children'] = []
-            if par_ref not in items.keys():
+            if par_ref and par_ref not in items.keys():
                 items[par_ref] = {}
                 items[par_ref]['children'] = [my_ref]
-            else:
+            elif par_ref:
                 items[par_ref]['children'].append(my_ref)
             items[my_ref]['displayName'] = disp
         for ref in items.keys():
@@ -99,8 +110,8 @@ def fetch_admin_templates(fname):
                 for policy in policies:
                     if policy.find('parentCategory').attrib['ref'] != parent:
                         continue
-                    disp = fetch_attr(policy, 'displayName', strings, presentations)
-                    desc = fetch_attr(policy, 'explainText', strings, presentations)
+                    disp = fetch_attr(policy, 'displayName', strings, adml_ns, presentations)
+                    desc = fetch_attr(policy, 'explainText', strings, adml_ns, presentations)
                     values[disp] = {}
                     val_type = None
                     elements = policy.find('elements')
